@@ -1,0 +1,169 @@
+// ============================================================================
+// DAX Measures — Sales Performance Dashboard
+//
+// Ports the SQL analytical logic from sql-data-analytics-project
+// (change-over-time, cumulative, performance, part-to-whole, and
+// segmentation analysis) into reusable Power BI measures for this report.
+//
+// Tables in the model: 'gold fact_sales', 'gold dim_customers', 'gold dim_products'
+// (imported from the Gold layer of sql-data-warehouse-project)
+//
+// SETUP — read this first
+// ------------------------------------------------------------------------
+// 1. This model has no date dimension yet ('gold fact_sales'[order_date] has
+//    repeated values, so it can't be marked as a date table on its own).
+//    Add the calculated table below FIRST (Modeling → New table), paste in
+//    the "Calendar" definition, then:
+//      a. Create a relationship: Calendar[Date] (1) -> 'gold fact_sales'[order_date] (*)
+//      b. Select the Calendar table -> Table tools -> "Mark as Date Table" -> Date
+//    Skipping this step means the time-intelligence measures below
+//    (SAMEPERIODLASTYEAR, DATEADD, etc.) will return blank or error.
+// 2. Then add each measure individually: Modeling -> New Measure -> paste the
+//    DAX after the "=" line -> Enter. (Or paste the whole file into Tabular
+//    Editor's "Create From DAX Script" if you use that tool.)
+// 3. Format as currency/whole number/percentage to match each card's existing
+//    display format (right-click the measure -> Format).
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// 0. Date table (add as a calculated TABLE, not a measure — see setup step 1)
+// ---------------------------------------------------------------------------
+
+Calendar =
+ADDCOLUMNS (
+    CALENDAR ( MIN ( 'gold fact_sales'[order_date] ), MAX ( 'gold fact_sales'[order_date] ) ),
+    "Year", YEAR ( [Date] ),
+    "Quarter", "Q" & FORMAT ( [Date], "Q" ),
+    "Month", FORMAT ( [Date], "MMM" ),
+    "Month Number", MONTH ( [Date] )
+)
+
+
+// ---------------------------------------------------------------------------
+// 1. Core KPIs
+// ---------------------------------------------------------------------------
+
+Total Sales =
+SUM ( 'gold fact_sales'[sales_amount] )
+
+Total Orders =
+DISTINCTCOUNT ( 'gold fact_sales'[order_number] )
+
+Total Customers =
+DISTINCTCOUNT ( 'gold dim_customers'[customer_number] )
+
+Average Order Value =
+DIVIDE ( [Total Sales], [Total Orders] )
+
+
+// ---------------------------------------------------------------------------
+// 2. Change-over-time analysis (requires the Calendar table — see setup)
+// ---------------------------------------------------------------------------
+
+Sales PY =
+CALCULATE ( [Total Sales], SAMEPERIODLASTYEAR ( 'Calendar'[Date] ) )
+
+Sales YoY Growth % =
+DIVIDE ( [Total Sales] - [Sales PY], [Sales PY] )
+
+Sales PQ =
+CALCULATE ( [Total Sales], DATEADD ( 'Calendar'[Date], -1, QUARTER ) )
+
+Sales QoQ Growth % =
+DIVIDE ( [Total Sales] - [Sales PQ], [Sales PQ] )
+
+
+// ---------------------------------------------------------------------------
+// 3. Cumulative analysis (requires the Calendar table — see setup)
+// ---------------------------------------------------------------------------
+
+Running Total Sales =
+CALCULATE (
+    [Total Sales],
+    FILTER (
+        ALLSELECTED ( 'Calendar'[Date] ),
+        'Calendar'[Date] <= MAX ( 'Calendar'[Date] )
+    )
+)
+
+Running Total Orders =
+CALCULATE (
+    [Total Orders],
+    FILTER (
+        ALLSELECTED ( 'Calendar'[Date] ),
+        'Calendar'[Date] <= MAX ( 'Calendar'[Date] )
+    )
+)
+
+
+// ---------------------------------------------------------------------------
+// 4. Performance analysis — each product vs. the average product
+// ---------------------------------------------------------------------------
+
+Avg Sales per Product =
+AVERAGEX ( VALUES ( 'gold dim_products'[product_name] ), [Total Sales] )
+
+Sales vs Avg Product Sales =
+[Total Sales] - [Avg Sales per Product]
+
+Sales vs Avg % =
+DIVIDE ( [Sales vs Avg Product Sales], [Avg Sales per Product] )
+
+Product Performance Flag =
+VAR Diff = [Sales vs Avg Product Sales]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( Diff ), BLANK (),
+        Diff > 0, "Above Average",
+        Diff < 0, "Below Average",
+        "At Average"
+    )
+
+
+// ---------------------------------------------------------------------------
+// 5. Part-to-whole analysis
+// ---------------------------------------------------------------------------
+
+% of Total Sales by Category =
+DIVIDE (
+    [Total Sales],
+    CALCULATE ( [Total Sales], ALL ( 'gold dim_products'[category] ) )
+)
+
+% of Total Sales by Country =
+DIVIDE (
+    [Total Sales],
+    CALCULATE ( [Total Sales], ALL ( 'gold dim_customers'[country] ) )
+)
+
+
+// ---------------------------------------------------------------------------
+// 6. Customer segmentation — by total lifetime spend
+//    (thresholds are placeholders — adjust to match your own analysis,
+//    e.g. the percentile breaks used in sql-data-analytics-project)
+// ---------------------------------------------------------------------------
+
+Customer Total Spend =
+CALCULATE (
+    [Total Sales],
+    ALLEXCEPT ( 'gold dim_customers', 'gold dim_customers'[customer_number] )
+)
+
+Customer Segment =
+VAR Spend = [Customer Total Spend]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( Spend ), BLANK (),
+        Spend >= 5000, "VIP",
+        Spend >= 1000, "Regular",
+        "New / Low-Spend"
+    )
+
+VIP Customers =
+CALCULATE (
+    DISTINCTCOUNT ( 'gold dim_customers'[customer_number] ),
+    FILTER ( VALUES ( 'gold dim_customers'[customer_number] ), [Customer Segment] = "VIP" )
+)
